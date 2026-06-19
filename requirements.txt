@@ -1,0 +1,11 @@
+qdrant-client
+llama-index
+llama-index-vector-stores-qdrant
+llama-index-embeddings-huggingface
+llama-index-llms-ollama
+pydantic
+fastapi
+uvicorn[standard]
+python-multipart
+pypdf
+duckduckgo-search

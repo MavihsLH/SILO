@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Agentic RAG Agent — AI-powered knowledge base with multi-collection support. Upload documents, ask questions, get intelligent answers with source citations.">
+  <title>Agentic RAG Agent</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="icon" href="/static/img/logo-transparent.png">
+</head>
+<body>
+
+  <div class="app-layout">
+
+    <!-- ═══════════════════════════════════════════════════ -->
+    <!-- SIDEBAR -->
+    <!-- ═══════════════════════════════════════════════════ -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- Sidebar Tabs -->
+      <div class="sidebar-tabs">
+        <button class="sidebar-tab active" id="tab-collections" title="Switch to Collections">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          Collections
+        </button>
+        <button class="sidebar-tab" id="tab-chats" title="Switch to Chats">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          Chats
+        </button>
+      </div>
+
+      <!-- Collections View -->
+      <div class="sidebar-view" id="view-collections">
+        <!-- Collections Section Label -->
+        <div class="sidebar-section" style="margin-top: var(--space-md); display: flex; align-items: center; justify-content: space-between;">
+          <div class="sidebar-section-title" style="margin-bottom: 0;">Collections</div>
+          <div class="dropdown-container" id="collection-options-container" style="display: none; position: relative;">
+            <button class="icon-btn dropdown-toggle" id="collection-options-btn" title="Collection Options" style="padding: 4px; width: 28px; height: 28px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+            </button>
+            <div class="dropdown-menu" id="collection-options-menu" style="right: 0; left: auto; top: 100%;">
+              <div class="dropdown-item" id="edit-collection-btn">Edit Collection</div>
+              <div class="dropdown-item text-danger" id="delete-collection-btn">Delete Collection</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Collections List -->
+        <div class="collections-list" id="collections-list">
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- Add Collection Button -->
+        <button class="add-collection-btn" id="add-collection-btn" title="Create a new collection">
+          <span>＋</span>
+          <span>New Collection</span>
+        </button>
+
+        <!-- Files in Active Collection -->
+        <div class="sidebar-files" id="sidebar-files">
+          <div class="sidebar-files-title">
+            <span>Files</span>
+            <span id="file-count-badge">0</span>
+          </div>
+          <div class="indexing-progress-container" id="indexing-progress" style="display: none;">
+            <div class="indexing-progress-bar-track">
+              <div class="indexing-progress-bar-fill" id="indexing-progress-fill" style="width: 0%"></div>
+            </div>
+            <div class="indexing-progress-info">
+              <span class="indexing-progress-label" id="indexing-progress-label">Starting...</span>
+              <span class="indexing-progress-pct" id="indexing-progress-pct">0%</span>
+            </div>
+          </div>
+          <div id="files-list">
+            <!-- Populated by JS -->
+          </div>
+          <div class="sidebar-action-buttons">
+            <button class="upload-btn sidebar-action-btn" id="upload-btn" title="Upload a file to this collection">
+              Upload
+            </button>
+            <button class="ingest-btn sidebar-action-btn" id="ingest-btn" title="Index all files into the knowledge base">
+              Index
+            </button>
+          </div>
+          <div style="margin-top: var(--space-xs);">
+            <button class="sidebar-action-btn" id="sidebar-start-chat-btn" style="width: 100%; border-color: var(--accent); color: var(--accent);" title="Start a chat on this collection">
+              💬 Start Chat
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chats View -->
+      <div class="sidebar-view hidden" id="view-chats">
+        <div class="sidebar-section" style="margin-top: var(--space-md);">
+          <div class="sidebar-section-title">Chat Sessions</div>
+        </div>
+        
+        <!-- Chats List -->
+        <div class="chats-list" id="chats-list">
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- Add Chat Button -->
+        <button class="add-chat-btn" id="add-chat-btn" title="Start a new chat">
+          <span>＋</span>
+          <span>New Chat</span>
+        </button>
+      </div>
+
+    </aside>
+
+    <!-- ═══════════════════════════════════════════════════ -->
+    <!-- MAIN CHAT AREA -->
+    <!-- ═══════════════════════════════════════════════════ -->
+    <main class="main-content" id="main-content">
+
+      <!-- Chat Header -->
+      <div class="chat-header">
+        <div class="chat-header-left">
+          <button class="icon-btn" id="sidebar-toggle-btn" title="Toggle Sidebar" style="margin-right: var(--space-sm);">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+          </button>
+          
+          <div class="chat-header-logo" style="display: flex; align-items: center; gap: var(--space-sm); margin-right: var(--space-lg);">
+            <img src="/static/img/logo-dark-crop.png" alt="Silo Logo" style="height: 24px; object-fit: contain;">
+            <span class="version-badge" style="font-size: 10px; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; color: var(--text-muted);">v1.0</span>
+          </div>
+        </div>
+        <div class="chat-header-right" style="display: flex; align-items: center; gap: var(--space-md);">
+
+          <div class="online-toggle-wrapper">
+            <span class="online-label">🌐 Web Search</span>
+            <label class="switch">
+              <input type="checkbox" id="online-mode-toggle">
+              <span class="slider round"></span>
+            </label>
+            <div class="online-tooltip">
+              When enabled, the AI may search the web to supplement answers. Your query text will be sent to a search engine.<br><br>
+              ⚠️ Your documents are NEVER sent.
+            </div>
+          </div>
+          <button class="icon-btn" id="settings-btn" title="Model Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Chat Messages -->
+      <div class="chat-messages" id="chat-messages">
+        <!-- Empty state (shown when no messages) -->
+        <div class="chat-empty-state" id="empty-state">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          </div>
+          <h3>Ask anything about your knowledge base</h3>
+          <p>Select a collection from the sidebar, then ask questions. The AI will search through your documents and provide answers with source citations.</p>
+          <div class="suggested-queries" id="suggested-queries">
+            <!-- Populated by JS based on active collection -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper" id="chat-input-wrapper">
+          <div class="chat-collection-badge" id="chat-collection-badge" style="background: transparent; border: none; border-right: 1px solid var(--border-medium); border-radius: 0; color: var(--text-secondary); font-size: 13px; padding: 0 12px 0 8px; margin-right: 4px; height: 32px; align-self: center;">
+            <span id="chat-collection-dot" class="collection-dot" style="width:6px;height:6px;"></span>
+            <span id="chat-collection-name">No collection selected</span>
+          </div>
+          <button class="input-btn" id="attach-btn" title="Upload a file">📎</button>
+          <textarea 
+            class="chat-input" 
+            id="chat-input" 
+            placeholder="Ask a question about your documents..."
+            rows="1"
+          ></textarea>
+          <div class="input-actions">
+            <button class="input-btn send-btn" id="send-btn" title="Send message" disabled>
+              ➤
+            </button>
+          </div>
+        </div>
+        <div class="chat-disclaimer">AI can make mistakes. Verify important information with your sources.</div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- DROP OVERLAY (shown when dragging files) -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="drop-overlay" id="drop-overlay">
+    <div class="drop-overlay-icon">
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+    </div>
+    <h2>Drop your file here</h2>
+    <p>PDF, TXT, MD, or CSV files supported</p>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- CREATE COLLECTION MODAL -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="create-modal">
+    <div class="modal">
+      <h2>Create New Collection</h2>
+      
+      <div class="form-group">
+        <label for="collection-name-input">Collection Name</label>
+        <input type="text" id="collection-name-input" placeholder="e.g., Legal Documents, Research Papers..." autocomplete="off">
+      </div>
+
+      <div class="form-group">
+        <label for="collection-desc-input">Description (optional)</label>
+        <textarea id="collection-desc-input" rows="2" placeholder="What kind of documents will this contain?"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>Accent Color</label>
+        <div class="color-picker-row">
+          <input type="color" id="collection-color-input" value="#6366f1">
+          <div class="color-presets" id="color-presets">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="modal-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="modal-create-btn">Create Collection</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- EDIT COLLECTION MODAL -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="edit-modal">
+    <div class="modal">
+      <h2>Edit Collection</h2>
+      
+      <div class="form-group">
+        <label for="edit-collection-name-input">Collection Name</label>
+        <input type="text" id="edit-collection-name-input" placeholder="e.g., Legal Documents, Research Papers..." autocomplete="off" disabled>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Collection names cannot be changed once created.</div>
+      </div>
+
+      <div class="form-group">
+        <label for="edit-collection-desc-input">Description (optional)</label>
+        <textarea id="edit-collection-desc-input" rows="2" placeholder="What kind of documents will this contain?"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>Accent Color</label>
+        <div class="color-picker-row">
+          <input type="color" id="edit-collection-color-input" value="#6366f1">
+          <div class="color-presets" id="edit-color-presets">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="edit-modal-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="edit-modal-save-btn">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- SETTINGS MODAL -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="settings-modal">
+    <div class="modal">
+      <h2>Settings</h2>
+      
+      <div class="form-group">
+        <label for="theme-select">App Theme</label>
+        <select id="theme-select" class="form-select">
+          <option value="dark">Dark Theme (Default)</option>
+          <option value="light">Light Theme</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="chat-model-select">Chat Model</label>
+        <select id="chat-model-select" class="form-select">
+          <option value="llama3.1:8b">llama3.1:8b (Default)</option>
+        </select>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Used for reasoning, answering queries, and agentic workflows.</div>
+      </div>
+
+      <div class="form-group">
+        <label for="ingest-model-select">Smart Ingestion Model</label>
+        <select id="ingest-model-select" class="form-select">
+          <option value="llama3.2:1b">llama3.2:1b (Default)</option>
+        </select>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Lightweight model used for extracting titles and metadata during document indexing.</div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="settings-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="settings-save-btn">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- INDEXING STRATEGY MODAL -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="indexing-modal">
+    <div class="modal">
+      <h2>Choose Indexing Strategy</h2>
+      <p style="margin-bottom: var(--space-md); color: var(--text-secondary); font-size: 13px;">
+        How should we process the documents in this collection?
+      </p>
+
+      <div class="strategy-option">
+        <input type="radio" name="index_strategy" id="strategy-fast" value="fast" checked>
+        <label for="strategy-fast">
+          <strong>Fast Indexing (Default)</strong>
+          <span>Basic text splitting. Takes seconds. Good for general documents.</span>
+        </label>
+      </div>
+
+      <div class="strategy-option" style="margin-top: 10px;">
+        <input type="radio" name="index_strategy" id="strategy-smart" value="smart">
+        <label for="strategy-smart">
+          <strong>Smart Indexing (LLM Enriched)</strong>
+          <span>AI reads documents to extract titles and keywords. Slower, but better search accuracy.</span>
+        </label>
+      </div>
+
+      <div class="modal-actions" style="margin-top: var(--space-lg);">
+        <button class="btn btn-ghost" id="indexing-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="indexing-start-btn">Start Indexing</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TOAST NOTIFICATIONS -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Hidden file input -->
+  <input type="file" id="file-input" class="hidden" accept=".pdf,.txt,.md,.csv">
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

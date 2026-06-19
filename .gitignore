@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+qdrant_storage/
+data/
+venv/
+.venv/
+.idea/
+.vscode/
+.DS_Store
