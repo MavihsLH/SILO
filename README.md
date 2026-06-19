@@ -22,19 +22,16 @@ Most modern AI document tools require you to upload proprietary research, financ
 
 ## (▀̿Ĺ̯▀̿ ̿) Dashboard Preview
 
-Below are placeholders showing where screenshots of SILO in action should be placed:
-
 ### 1. Collections & Document Management View
 This view shows the unified sidebar tab selector where you upload files, configure indexing settings, and monitor vectorization progress.
-```
-[PLACEHOLDER: Upload a screenshot of the main dashboard with the "Collections" tab active. Show the uploaded research papers and the file indexing indicator.]
-```
+
+<img width="2560" height="1416" alt="image" src="https://github.com/user-attachments/assets/94f40ff3-de34-4067-8db3-b1fce58e38f4" />
+
 
 ### 2. Multi-Chat Session History
 This view highlights the chat tab where you manage persistent chat sessions, toggle web search, and see AI answers complete with cited sources.
-```
-[PLACEHOLDER: Upload a screenshot with the "Chats" tab active. Show an ongoing chat session where the AI has responded with interactive source citation chips.]
-```
+
+<img width="2560" height="1422" alt="image" src="https://github.com/user-attachments/assets/4efcf92f-0a82-409a-bb5b-b7aa00c9309b" />
 
 ---
 
