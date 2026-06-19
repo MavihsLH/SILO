@@ -55,7 +55,6 @@ const $filesList = document.getElementById('files-list');
 const $fileCountBadge = document.getElementById('file-count-badge');
 const $uploadBtn = document.getElementById('upload-btn');
 const $ingestBtn = document.getElementById('ingest-btn');
-const $sidebarStartChatBtn = document.getElementById('sidebar-start-chat-btn');
 const $indexingProgress = document.getElementById('indexing-progress');
 const $indexingProgressFill = document.getElementById('indexing-progress-fill');
 const $indexingProgressLabel = document.getElementById('indexing-progress-label');
@@ -1146,7 +1145,6 @@ if ($tabChats) $tabChats.addEventListener('click', () => switchTab('chats'));
 
 // Chats buttons listeners
 if ($addChatBtn) $addChatBtn.addEventListener('click', () => createNewChat());
-if ($sidebarStartChatBtn) $sidebarStartChatBtn.addEventListener('click', () => createNewChat());
 
 if ($sidebarToggleBtn) {
   $sidebarToggleBtn.addEventListener('click', () => {
