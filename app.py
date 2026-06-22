@@ -6,13 +6,18 @@ Serves the static frontend and provides endpoints for
 collections management, file upload, and chat.
 """
 
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
 import requests
+import json
 
 from rag_engine import RAGEngine
 
@@ -62,6 +67,7 @@ class SendMessageRequest(BaseModel):
 class SettingsRequest(BaseModel):
     chat_model: str
     ingestion_model: str
+    strict_mode: Optional[bool] = False
 
 class IngestRequest(BaseModel):
     smart_mode: bool = False
@@ -92,7 +98,8 @@ def update_settings(req: SettingsRequest):
     """Update AI model settings."""
     return engine.update_settings(
         chat_model=req.chat_model,
-        ingestion_model=req.ingestion_model
+        ingestion_model=req.ingestion_model,
+        strict_mode=req.strict_mode
     )
 
 # ============================================================
@@ -336,7 +343,7 @@ def delete_chat(chat_id: str):
 
 
 @app.post("/api/chats/{chat_id}/message")
-async def send_chat_message(chat_id: str, req: SendMessageRequest):
+async def send_chat_message(chat_id: str, req: SendMessageRequest, stream: bool = False):
     """Send a message to a specific chat session and run RAG query."""
     chat = engine.get_chat(chat_id)
     if chat is None:
@@ -344,21 +351,61 @@ async def send_chat_message(chat_id: str, req: SendMessageRequest):
     
     collection = chat["collection"]
     
-    try:
-        result = await engine.aquery(safe_name=collection, question=req.message, online_mode=req.online_mode)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+    if not stream:
+        try:
+            result = await engine.aquery(safe_name=collection, question=req.message, online_mode=req.online_mode)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+            
+        engine.add_chat_message(chat_id, "user", req.message)
+        updated_chat = engine.add_chat_message(chat_id, "assistant", result["answer"], sources=result["sources"])
         
-    engine.add_chat_message(chat_id, "user", req.message)
-    updated_chat = engine.add_chat_message(chat_id, "assistant", result["answer"], sources=result["sources"])
+        return {
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "chat_title": updated_chat["title"] if updated_chat else chat["title"]
+        }
     
-    return {
-        "answer": result["answer"],
-        "sources": result["sources"],
-        "chat_title": updated_chat["title"] if updated_chat else chat["title"]
-    }
+    # Streaming response
+    async def event_generator():
+        # First add the user's message to backend state (will auto-rename title if first message)
+        updated_chat = engine.add_chat_message(chat_id, "user", req.message)
+        chat_title = updated_chat["title"] if updated_chat else chat["title"]
+        
+        full_answer = ""
+        sources = []
+        
+        try:
+            # Call streaming query generator
+            async for chunk in engine.astream_query(safe_name=collection, question=req.message, online_mode=req.online_mode):
+                if chunk["type"] == "sources":
+                    sources = chunk["sources"]
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif chunk["type"] == "token":
+                    token = chunk["token"]
+                    full_answer += token
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif chunk["type"] == "clear":
+                    full_answer = ""
+                    sources = []
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif chunk["type"] == "status":
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # Now that generation is done, save the complete assistant message to disk
+            engine.add_chat_message(chat_id, "assistant", full_answer, sources=sources)
+            
+            # Send done event with final chat title
+            yield f"data: {json.dumps({'type': 'done', 'chat_title': chat_title})}\n\n"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ============================================================

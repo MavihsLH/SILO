@@ -37,7 +37,8 @@ from llama_index.core.agent import ReActAgent
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
-from duckduckgo_search import DDGS
+from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
+from ddgs import DDGS
 
 # --- PATCH FOR LlamaIndex/dirtyjson BUG ---
 # LlamaIndex uses dirtyjson to parse malformed LLM outputs.
@@ -121,6 +122,9 @@ class RAGEngine:
         # Connect to Qdrant (Async and Sync)
         self.qdrant_client = AsyncQdrantClient(host=qdrant_host, port=qdrant_port)
         self.qdrant_client_sync = QdrantClient(host=qdrant_host, port=qdrant_port)
+        
+        # Initialize Re-ranker
+        self.reranker = SentenceTransformerRerank(model="cross-encoder/ms-marco-MiniLM-L-6-v2", top_n=4)
 
         # Load or initialize collections metadata and chats
         self._collections_meta = self._load_collections_meta()
@@ -134,10 +138,13 @@ class RAGEngine:
         if SETTINGS_FILE.exists():
             try:
                 with open(SETTINGS_FILE, "r") as f:
-                    return json.load(f)
+                    settings = json.load(f)
+                    if "strict_mode" not in settings:
+                        settings["strict_mode"] = False
+                    return settings
             except Exception:
                 pass
-        return {"chat_model": "llama3.1:8b", "ingestion_model": "llama3.2:1b"}
+        return {"chat_model": "llama3.1:8b", "ingestion_model": "llama3.2:1b", "strict_mode": False}
 
     def _save_settings(self):
         with open(SETTINGS_FILE, "w") as f:
@@ -146,9 +153,10 @@ class RAGEngine:
     def get_settings(self) -> dict:
         return self._settings
 
-    def update_settings(self, chat_model: str, ingestion_model: str) -> dict:
+    def update_settings(self, chat_model: str, ingestion_model: str, strict_mode: bool = False) -> dict:
         self._settings["chat_model"] = chat_model
         self._settings["ingestion_model"] = ingestion_model
+        self._settings["strict_mode"] = strict_mode
         self._save_settings()
         
         # Re-initialize LLM
@@ -368,6 +376,7 @@ class RAGEngine:
             client=self.qdrant_client_sync,
             aclient=self.qdrant_client,
             collection_name=safe_name,
+            enable_hybrid=True,
         )
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -386,11 +395,38 @@ class RAGEngine:
             report("enriching", 30, "AI is extracting titles and keywords from chunks...")
 
             # Use num_workers=1 to prevent concurrent connection socket exhaustion in local Ollama instances
+            CUSTOM_TITLE_NODE_TEMPLATE = (
+                "Context: {context_str}\n\n"
+                "Extract a single, concise title for this text. "
+                "Return ONLY the title itself, with no preamble, no quotes, and no explanation."
+            )
+            CUSTOM_TITLE_COMBINE_TEMPLATE = (
+                "Context: {context_str}\n\n"
+                "Based on the above candidate titles and content, extract a single, comprehensive title for this document. "
+                "Return ONLY the title itself, with no preamble, no quotes, no conversational text, and no explanation."
+            )
+            CUSTOM_KEYWORD_TEMPLATE = (
+                "Context: {context_str}\n\n"
+                "Extract exactly {keywords} unique keywords for this document. "
+                "Return ONLY a comma-separated list of keywords, with no preamble, no explanation, and no formatting."
+            )
+            
             pipeline = IngestionPipeline(
                 transformations=[
                     SentenceSplitter(chunk_size=512, chunk_overlap=64),
-                    TitleExtractor(llm=enrichment_llm, nodes=3, num_workers=1),
-                    KeywordExtractor(llm=enrichment_llm, keywords=5, num_workers=1),
+                    TitleExtractor(
+                        llm=enrichment_llm, 
+                        nodes=3, 
+                        num_workers=1,
+                        node_template=CUSTOM_TITLE_NODE_TEMPLATE,
+                        combine_template=CUSTOM_TITLE_COMBINE_TEMPLATE
+                    ),
+                    KeywordExtractor(
+                        llm=enrichment_llm, 
+                        keywords=5, 
+                        num_workers=1,
+                        prompt_template=CUSTOM_KEYWORD_TEMPLATE
+                    ),
                     self.embed_model,
                 ]
             )
@@ -448,10 +484,17 @@ class RAGEngine:
             if safe_name not in qdrant_collections:
                 return []
 
-            vector_store = QdrantVectorStore(aclient=self.qdrant_client, collection_name=safe_name)
+            vector_store = QdrantVectorStore(aclient=self.qdrant_client, collection_name=safe_name, enable_hybrid=True)
             index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
-            retriever = index.as_retriever(similarity_top_k=top_k)
-            return await retriever.aretrieve(query)
+            
+            # Retrieve more candidate chunks and use hybrid search
+            retriever = index.as_retriever(similarity_top_k=max(15, top_k * 5), vector_store_query_mode="hybrid")
+            nodes = await retriever.aretrieve(query)
+            
+            # Apply cross-encoder re-ranking
+            self.reranker.top_n = top_k
+            nodes = self.reranker.postprocess_nodes(nodes, query_str=query)
+            return nodes
 
         # ════════════════════════════════════════════════════
         # PATH 1: Simple RAG (no agent, single LLM call)
@@ -497,12 +540,78 @@ class RAGEngine:
             return {"answer": answer_text, "sources": sources}
 
         # ════════════════════════════════════════════════════
-        # PATH 2: Agent mode (online_mode=True, multi-tool)
+        # PATH 2: Agent mode (online_mode=True, LangGraph CRAG)
         # ════════════════════════════════════════════════════
-        async def search_knowledge_base(query: str) -> str:
-            """Searches the local knowledge base for the given query. Use this tool first to find relevant information."""
-            nodes = await _retrieve_from_kb(query)
-            result_texts = []
+        try:
+            from agent_graph import agent_graph
+        except ImportError as e:
+            raise RuntimeError("LangGraph is not installed. Please run 'pip install langgraph' to use Agentic mode.") from e
+
+        initial_state = {
+            "question": question,
+            "original_question": question,
+            "documents": [],
+            "sources": [],
+            "web_search": False,
+            "generation": "",
+            "retry_count": 0,
+            "strict_mode": self._settings.get("strict_mode", False),
+            "is_grounded": True
+        }
+
+        config = {
+            "configurable": {
+                "engine": self,
+                "safe_name": safe_name,
+                "top_k": top_k
+            }
+        }
+
+        try:
+            final_state = await agent_graph.ainvoke(initial_state, config)
+            return {
+                "answer": final_state["generation"],
+                "sources": final_state["sources"]
+            }
+        except Exception as e:
+            logger.error(f"LangGraph execution error: {e}")
+            raise e
+
+    async def astream_query(self, safe_name: str, question: str, top_k: int = 3, online_mode: bool = False):
+        """
+        Query a collection's knowledge base and stream tokens/sources.
+        Yields dictionaries.
+        """
+        sources = []
+
+        # ── Helper: retrieve from local KB ──
+        async def _retrieve_from_kb(query: str) -> list:
+            try:
+                collections_response = await self.qdrant_client.get_collections()
+                qdrant_collections = {c.name for c in collections_response.collections}
+            except Exception:
+                qdrant_collections = set()
+
+            if safe_name not in qdrant_collections:
+                return []
+
+            vector_store = QdrantVectorStore(aclient=self.qdrant_client, collection_name=safe_name, enable_hybrid=True)
+            index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
+            
+            # Retrieve more candidate chunks and use hybrid search
+            retriever = index.as_retriever(similarity_top_k=max(15, top_k * 5), vector_store_query_mode="hybrid")
+            nodes = await retriever.aretrieve(query)
+            
+            # Apply cross-encoder re-ranking
+            self.reranker.top_n = top_k
+            nodes = self.reranker.postprocess_nodes(nodes, query_str=query)
+            return nodes
+
+        if not online_mode:
+            nodes = await _retrieve_from_kb(question)
+
+            # Build sources list
+            context_texts = []
             for node in nodes:
                 sources.append({
                     "text": node.text[:300] + ("..." if len(node.text) > 300 else ""),
@@ -510,64 +619,89 @@ class RAGEngine:
                     "metadata": node.metadata,
                     "type": "local"
                 })
-                result_texts.append(f"Content: {node.text}")
-            if not result_texts:
-                return "No relevant information found in the local knowledge base."
-            return "\n\n".join(result_texts)
+                context_texts.append(node.text)
 
-        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-        def search_web(query: str) -> str:
-            """Searches the web using DuckDuckGo for up-to-date or missing information. Use only if local knowledge base is insufficient."""
+            # Yield sources first
+            yield {"type": "sources", "sources": sources}
+
+            # Build the prompt
+            if context_texts:
+                context_block = "\n\n---\n\n".join(context_texts)
+                prompt = (
+                    f"You are an intelligent assistant. Use the following context from the user's knowledge base to answer their question. "
+                    f"If the context is not relevant to the question, you may ignore it and answer based on your own knowledge. "
+                    f"Always be helpful and concise.\n\n"
+                    f"## Context:\n{context_block}\n\n"
+                    f"## Question:\n{question}"
+                )
+            else:
+                prompt = (
+                    f"You are an intelligent assistant. The user's knowledge base returned no results for this query. "
+                    f"Answer based on your own knowledge. Always be helpful and concise.\n\n"
+                    f"## Question:\n{question}"
+                )
+
             try:
-                with DDGS() as ddgs:
-                    results = list(ddgs.text(query, max_results=3))
-                result_texts = []
-                for r in results:
-                    sources.append({
-                        "text": f"[{r['title']}] {r['body']}",
-                        "score": 1.0,
-                        "metadata": {"url": r['href'], "title": r['title']},
-                        "type": "web"
-                    })
-                    result_texts.append(f"Title: {r['title']}\nSummary: {r['body']}\nURL: {r['href']}")
-                if not result_texts:
-                    return "No relevant information found on the web."
-                return "\n\n".join(result_texts)
+                stream_gen = await self.llm.astream_complete(prompt)
+                async for chunk in stream_gen:
+                    yield {"type": "token", "token": chunk.delta}
             except Exception as e:
-                logger.error(f"DDGS error: {e}")
-                return f"Error searching the web: {str(e)}"
+                logger.error(f"LLM error: [{type(e).__name__}] {e}")
+                raise e
 
-        tools = [
-            FunctionTool.from_defaults(async_fn=search_knowledge_base),
-            FunctionTool.from_defaults(fn=search_web),
-        ]
+        else:
+            # Agent mode streaming (LangGraph CRAG)
+            try:
+                from agent_graph import agent_graph
+            except ImportError as e:
+                yield {"type": "error", "message": "LangGraph is not installed. Please run 'pip install langgraph' to use Agentic mode."}
+                return
 
-        agent = ReActAgent(
-            tools=tools,
-            llm=self.llm,
-            verbose=True,
-            timeout=None,
-            max_iterations=10,
-            context="You are an intelligent RAG assistant. Search the local knowledge base first. If the answer is insufficient, use web search to supplement. If you cannot find relevant information, answer from your own knowledge."
-        )
+            queue = asyncio.Queue()
 
-        try:
-            response = await agent.run(user_msg=question)
-            answer_text = str(response)
-        except Exception as e:
-            logger.error(f"Agent error: [{type(e).__name__}] {e}")
-            raise e
+            async def on_token_callback(data: dict):
+                await queue.put(data)
 
-        # Deduplicate sources
-        unique_sources = []
-        seen = set()
-        for s in sources:
-            key = s["text"]
-            if key not in seen:
-                seen.add(key)
-                unique_sources.append(s)
+            initial_state = {
+                "question": question,
+                "original_question": question,
+                "documents": [],
+                "sources": [],
+                "web_search": False,
+                "generation": "",
+                "retry_count": 0,
+                "strict_mode": self._settings.get("strict_mode", False),
+                "is_grounded": True
+            }
 
-        return {"answer": answer_text, "sources": unique_sources}
+            config = {
+                "configurable": {
+                    "engine": self,
+                    "safe_name": safe_name,
+                    "top_k": top_k,
+                    "on_token": on_token_callback
+                }
+            }
+
+            async def run_graph():
+                try:
+                    await agent_graph.ainvoke(initial_state, config)
+                except Exception as e:
+                    logger.error(f"Error inside LangGraph stream task: {e}")
+                    await queue.put({"type": "error", "message": str(e)})
+                finally:
+                    await queue.put(None)
+
+            graph_task = asyncio.create_task(run_graph())
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+                queue.task_done()
+
+            await graph_task
 
     # ────────────────────────────────────────────────────────
     # Chat Sessions Management

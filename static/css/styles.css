@@ -662,6 +662,7 @@ html, body {
   border-radius: var(--radius-sm);
   line-height: 1.6;
   font-size: 13.5px;
+  white-space: pre-wrap;
 }
 
 .message.user .message-content {
@@ -677,6 +678,7 @@ html, body {
   padding: var(--space-xs) 0;
   border-bottom-left-radius: var(--radius-sm);
   color: var(--text-primary);
+  white-space: normal;
 }
 
 /* ── Source Citations (inline in assistant messages) ── */
@@ -685,6 +687,7 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs);
+  white-space: normal;
 }
 
 .source-chip {
@@ -701,6 +704,7 @@ html, body {
   cursor: pointer;
   transition: all var(--transition-fast);
   position: relative;
+  white-space: normal;
 }
 
 .source-chip:hover {
@@ -1082,6 +1086,19 @@ html, body {
   color: #ffffff;
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(56, 182, 255, 0.3);
+}
+
+.btn-danger {
+  background: transparent;
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border-color: #ef4444;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
 }
 
 .sidebar-action-buttons {
@@ -1503,7 +1520,8 @@ input:checked + .slider:before {
   text-overflow: ellipsis;
 }
 
-.chat-item-actions {
+.chat-item-actions,
+.collection-item-actions {
   display: flex;
   gap: 2px;
   opacity: 0;
@@ -1515,17 +1533,21 @@ input:checked + .slider:before {
   height: 100%;
   align-items: center;
   top: 0;
+  z-index: 5;
 }
 
-.chat-item:hover .chat-item-actions {
+.chat-item:hover .chat-item-actions,
+.collection-item:hover .collection-item-actions {
   opacity: 1;
 }
 
-.chat-item.active .chat-item-actions {
+.chat-item.active .chat-item-actions,
+.collection-item.active .collection-item-actions {
   background: linear-gradient(90deg, transparent, var(--accent-soft) 20%);
 }
 
-.chat-action-btn {
+.chat-action-btn,
+.collection-action-btn {
   width: 24px;
   height: 24px;
   border-radius: 4px;
@@ -1539,12 +1561,14 @@ input:checked + .slider:before {
   transition: all var(--transition-fast);
 }
 
-.chat-action-btn:hover {
+.chat-action-btn:hover,
+.collection-action-btn:hover {
   background: var(--bg-elevated);
   color: var(--text-primary);
 }
 
-.chat-action-btn.delete:hover {
+.chat-action-btn.delete:hover,
+.collection-action-btn.delete:hover {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.1);
 }
@@ -1571,4 +1595,9 @@ input:checked + .slider:before {
   border-color: #38b6ff;
   color: #38b6ff;
   background: rgba(56, 182, 255, 0.1);
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }

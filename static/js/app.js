@@ -68,11 +68,7 @@ const $attachBtn = document.getElementById('attach-btn');
 const $chatCollectionBadge = document.getElementById('chat-collection-badge');
 const $chatCollectionDot = document.getElementById('chat-collection-dot');
 const $chatCollectionName = document.getElementById('chat-collection-name');
-const $collectionOptionsContainer = document.getElementById('collection-options-container');
-const $collectionOptionsBtn = document.getElementById('collection-options-btn');
-const $collectionOptionsMenu = document.getElementById('collection-options-menu');
-const $editCollectionBtn = document.getElementById('edit-collection-btn');
-const $deleteCollectionBtn = document.getElementById('delete-collection-btn');
+// Removed old top-level collection options elements
 
 const $tabCollections = document.getElementById('tab-collections');
 const $tabChats = document.getElementById('tab-chats');
@@ -97,6 +93,7 @@ const $editCollectionColorInput = document.getElementById('edit-collection-color
 const $editColorPresets = document.getElementById('edit-color-presets');
 const $editModalCancelBtn = document.getElementById('edit-modal-cancel-btn');
 const $editModalSaveBtn = document.getElementById('edit-modal-save-btn');
+const $editModalDeleteBtn = document.getElementById('edit-modal-delete-btn');
 
 const $fileInput = document.getElementById('file-input');
 const $toastContainer = document.getElementById('toast-container');
@@ -109,6 +106,7 @@ const $settingsSaveBtn = document.getElementById('settings-save-btn');
 const $chatModelSelect = document.getElementById('chat-model-select');
 const $ingestModelSelect = document.getElementById('ingest-model-select');
 const $themeSelect = document.getElementById('theme-select');
+const $settingsStrictMode = document.getElementById('settings-strict-mode');
 
 const $indexingModal = document.getElementById('indexing-modal');
 const $indexingCancelBtn = document.getElementById('indexing-cancel-btn');
@@ -197,15 +195,33 @@ function renderCollections() {
         <div class="collection-count">${col.file_count} file${col.file_count !== 1 ? 's' : ''}</div>
       </div>
       <span class="collection-status ${statusClass}">${statusText}</span>
+      <div class="collection-item-actions">
+        <button class="collection-action-btn manage-collection" title="Manage Collection">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+        </button>
+      </div>
     `;
 
-    item.addEventListener('click', () => selectCollection(col.safe_name));
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.collection-action-btn')) return;
+      selectCollection(col.safe_name);
+    });
+
+    item.querySelector('.manage-collection').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await selectCollection(col.safe_name);
+      openEditModal();
+    });
+
     $collectionsList.appendChild(item);
   });
 }
 
 async function selectCollection(safeName) {
   state.activeCollection = safeName;
+
+  // Clear active chat — the user is now browsing a collection directly
+  state.activeChatId = null;
 
   // Reset progress bar when switching collections
   hideProgressBar();
@@ -214,13 +230,11 @@ async function selectCollection(safeName) {
   renderCollections();
   await loadCollectionDetails(safeName);
   
-  // If no chat is active, show empty state for collection, otherwise keep active chat loaded
-  if (!state.activeChatId) {
-    state.messages = [];
-    renderChat();
-    updateChatHeader();
-    updateAccentColor();
-  }
+  // Reset chat area to empty state for this collection
+  state.messages = [];
+  renderChat();
+  updateChatHeader();
+  updateAccentColor();
 
   // Set correct button text: Index vs Reindex
   resetIngestButton();
@@ -237,11 +251,9 @@ function updateChatHeader() {
       $chatCollectionBadge.style.display = 'flex';
       $chatCollectionName.textContent = `${chat.title} (${col.name})`;
       $chatCollectionDot.style.background = col.color;
-      $collectionOptionsContainer.style.display = 'none';
     } else {
       $chatCollectionName.textContent = 'No collection selected';
       $chatCollectionDot.style.background = 'var(--text-muted)';
-      $collectionOptionsContainer.style.display = 'none';
     }
   } else {
     const col = state.collections.find(c => c.safe_name === state.activeCollection);
@@ -249,11 +261,9 @@ function updateChatHeader() {
       $chatCollectionBadge.style.display = 'flex';
       $chatCollectionName.textContent = col.name;
       $chatCollectionDot.style.background = col.color;
-      $collectionOptionsContainer.style.display = 'inline-block';
     } else {
       $chatCollectionName.textContent = 'No collection selected';
       $chatCollectionDot.style.background = 'var(--text-muted)';
-      $collectionOptionsContainer.style.display = 'none';
     }
   }
 }
@@ -567,6 +577,7 @@ async function loadModelsAndSettings() {
         $ingestModelSelect.innerHTML += `<option value="${settings.ingestion_model}">${settings.ingestion_model}</option>`;
         $ingestModelSelect.value = settings.ingestion_model;
       }
+      $settingsStrictMode.checked = settings.strict_mode || false;
     }
   } catch (e) {
     console.error("Failed to load models/settings", e);
@@ -599,7 +610,8 @@ async function saveSettings() {
       method: 'POST',
       body: JSON.stringify({
         chat_model: $chatModelSelect.value,
-        ingestion_model: $ingestModelSelect.value
+        ingestion_model: $ingestModelSelect.value,
+        strict_mode: $settingsStrictMode.checked
       })
     });
     
@@ -689,6 +701,68 @@ function renderSuggestedQueries() {
   });
 }
 
+function escapeHTML(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatInlineMarkdown(text) {
+  let html = text;
+  // Bold (**text** or __text__)
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__(.*?)__/g, '<strong>$1</strong>');
+
+  // Italic (*text* or _text_)
+  html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+  html = html.replace(/_(.*?)_/g, '<em>$1</em>');
+
+  // Inline Code (`code`)
+  html = html.replace(/`(.*?)`/g, '<code>$1</code>');
+  return html;
+}
+
+function formatMarkdown(text) {
+  if (!text) return '';
+  
+  // Escape HTML to prevent XSS
+  let safeText = escapeHTML(text);
+
+  // Split into block elements by double newlines
+  const blocks = safeText.split(/\n\n+/);
+  const formattedBlocks = blocks.map(block => {
+    block = block.trim();
+    if (!block) return '';
+
+    // Check if it's a bulleted list
+    if (block.startsWith('- ') || block.startsWith('* ')) {
+      const items = block.split(/\n/).map(line => {
+        const match = line.match(/^[-*]\s+(.*)/);
+        return match ? `<li style="list-style-type: disc; margin-bottom: 4px; line-height: 1.4;">${formatInlineMarkdown(match[1])}</li>` : `<li style="list-style-type: disc; margin-bottom: 4px; line-height: 1.4;">${formatInlineMarkdown(line)}</li>`;
+      });
+      return `<ul class="markdown-list" style="margin-left: var(--space-md); margin-top: 4px; margin-bottom: 8px; padding-left: 0;">${items.join('')}</ul>`;
+    }
+
+    // Check if it's a numbered list
+    if (/^\d+\.\s+/.test(block)) {
+      const items = block.split(/\n/).map(line => {
+        const match = line.match(/^\d+\.\s+(.*)/);
+        return match ? `<li style="list-style-type: decimal; margin-bottom: 4px; line-height: 1.4;">${formatInlineMarkdown(match[1])}</li>` : `<li style="list-style-type: decimal; margin-bottom: 4px; line-height: 1.4;">${formatInlineMarkdown(line)}</li>`;
+      });
+      return `<ol class="markdown-list" style="margin-left: var(--space-md); margin-top: 4px; margin-bottom: 8px; padding-left: 0;">${items.join('')}</ol>`;
+    }
+
+    // Otherwise, it is a paragraph
+    // Replace single newlines inside paragraph with a <br>
+    const paragraphContent = formatInlineMarkdown(block).replace(/\n/g, '<br>');
+    return `<p style="margin-bottom: 8px; margin-top: 0; line-height: 1.5;">${paragraphContent}</p>`;
+  });
+
+  return formattedBlocks.filter(b => b).join('');
+}
+
 function appendMessageToDOM(msg) {
   const div = document.createElement('div');
   div.className = `message ${msg.role}`;
@@ -722,13 +796,8 @@ function appendMessageToDOM(msg) {
     `;
   }
 
-  div.innerHTML = `
-    <div class="message-avatar">${avatar}</div>
-    <div class="message-content">
-      ${msg.content}
-      ${sourcesHTML}
-    </div>
-  `;
+  const renderedContent = msg.role === 'assistant' ? formatMarkdown(msg.content) : escapeHTML(msg.content);
+  div.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-content">${renderedContent}${sourcesHTML}</div>`;
 
   $emptyState.style.display = 'none';
   $chatMessages.appendChild(div);
@@ -798,34 +867,144 @@ async function sendMessage() {
   showLoadingMessage();
   scrollToBottom();
 
+  const currentChatId = state.activeChatId;
+
   try {
-    const result = await api(`/chats/${state.activeChatId}/message`, {
+    const response = await fetch(`/api/chats/${state.activeChatId}/message?stream=true`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         message: message,
         online_mode: $onlineModeToggle ? $onlineModeToggle.checked : false,
       }),
     });
 
+    // If user switched chats while the fetch was pending, discard response
+    if (state.activeChatId !== currentChatId) return;
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(err.detail || 'Failed to generate response.');
+    }
+
     removeLoadingMessage();
 
+    // Setup an empty AI response bubble
     const aiMsg = {
       role: 'assistant',
-      content: result.answer,
-      sources: result.sources,
+      content: '',
+      sources: []
     };
-    state.messages.push(aiMsg);
-    appendMessageToDOM(aiMsg);
 
-    // Update title in state and sidebar if it changed
-    const chat = state.chats.find(c => c.id === state.activeChatId);
-    if (chat && chat.title !== result.chat_title) {
-      chat.title = result.chat_title;
-      renderChats();
-      updateChatHeader();
+    const $msgDiv = document.createElement('div');
+    $msgDiv.className = 'message assistant';
+    $msgDiv.innerHTML = `<div class="message-avatar">🧠</div><div class="message-content"><div class="assistant-status-text" style="color: var(--text-muted); font-style: italic; font-size: 12.5px; margin-bottom: 8px; display: none; align-items: center; gap: 8px;"></div><div class="assistant-answer-text" style="white-space: normal;"></div><div class="message-sources" style="margin-top: var(--space-sm); display: flex; flex-wrap: wrap; gap: var(--space-xs);"></div></div>`;
+
+    $emptyState.style.display = 'none';
+    $chatMessages.appendChild($msgDiv);
+    scrollToBottom();
+
+    const $textDiv = $msgDiv.querySelector('.assistant-answer-text');
+    const $sourcesDiv = $msgDiv.querySelector('.message-sources');
+    const $statusDiv = $msgDiv.querySelector('.assistant-status-text');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      // If user switched chats while streaming, cancel the reader and exit
+      if (state.activeChatId !== currentChatId) {
+        reader.cancel();
+        break;
+      }
+
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Hold onto incomplete lines
+
+      for (const line of lines) {
+        const cleaned = line.trim();
+        if (!cleaned) continue;
+        if (cleaned.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(cleaned.slice(6));
+            if (data.type === 'sources') {
+              aiMsg.sources = data.sources;
+              if (data.sources && data.sources.length > 0) {
+                $sourcesDiv.innerHTML = data.sources.map((s, i) => {
+                  const isWeb = s.type === 'web';
+                  const icon = isWeb ? '🌐' : '📎';
+                  const chipClass = isWeb ? 'source-chip web' : 'source-chip';
+                  const title = isWeb ? 'Web Source' : `Source ${i + 1}`;
+                  const urlHtml = isWeb && s.metadata?.url ? 
+                    `<div style="margin-top: 6px; word-break: break-all; font-family: var(--font-mono); color: inherit;"><a href="${s.metadata.url}" target="_blank" style="color: inherit;">${s.metadata.url}</a></div>` : '';
+                  
+                  return `
+                  <span class="${chipClass}">
+                    ${icon} ${title}
+                    <div class="source-tooltip">
+                      ${s.text}
+                      ${urlHtml}
+                      ${!isWeb ? `<div class="source-tooltip-score">Relevance: ${(s.score * 100).toFixed(1)}%</div>` : ''}
+                    </div>
+                  </span>
+                  `;
+                }).join('');
+              }
+            } else if (data.type === 'clear') {
+              aiMsg.content = '';
+              $textDiv.innerHTML = '';
+              $sourcesDiv.innerHTML = '';
+              if ($statusDiv) {
+                $statusDiv.innerHTML = '';
+                $statusDiv.style.display = 'none';
+              }
+            } else if (data.type === 'status') {
+              if ($statusDiv) {
+                $statusDiv.innerHTML = `<div class="thinking-text" style="display: flex; align-items: center; gap: 8px;">
+                  <div class="spinner-small" style="width: 12px; height: 12px; border: 2px solid var(--border-subtle); border-top-color: var(--accent-color); border-radius: 50%; animation: spin 1s linear infinite; flex-shrink: 0;"></div>
+                  <span>${data.status}</span>
+                </div>`;
+                $statusDiv.style.display = 'flex';
+              }
+              scrollToBottom();
+            } else if (data.type === 'token') {
+              aiMsg.content += data.token;
+              $textDiv.innerHTML = formatMarkdown(aiMsg.content);
+              scrollToBottom();
+            } else if (data.type === 'done') {
+              if ($statusDiv) {
+                $statusDiv.innerHTML = '';
+                $statusDiv.style.display = 'none';
+              }
+              const chat = state.chats.find(c => c.id === state.activeChatId);
+              if (chat && chat.title !== data.chat_title) {
+                chat.title = data.chat_title;
+                renderChats();
+                updateChatHeader();
+              }
+            } else if (data.type === 'error') {
+              throw new Error(data.message);
+            }
+          } catch (err) {
+            console.error('Error parsing token stream chunk:', err);
+          }
+        }
+      }
+    }
+
+    if (state.activeChatId === currentChatId) {
+      state.messages.push(aiMsg);
     }
 
   } catch (err) {
+    if (state.activeChatId !== currentChatId) return;
     removeLoadingMessage();
     const errorMsg = {
       role: 'assistant',
@@ -850,7 +1029,7 @@ function scrollToBottom() {
 // CHAT SESSION MANAGEMENT (API HELPERS)
 // ════════════════════════════════════════════════════════
 
-function switchTab(tab) {
+async function switchTab(tab) {
   if (tab === 'collections') {
     $tabCollections.classList.add('active');
     $tabChats.classList.remove('active');
@@ -861,7 +1040,10 @@ function switchTab(tab) {
     $tabChats.classList.add('active');
     $viewCollections.classList.add('hidden');
     $viewChats.classList.remove('hidden');
-    loadChats();
+    await loadChats();
+    if (!state.activeChatId && state.chats.length > 0) {
+      await selectChat(state.chats[0].id);
+    }
   }
 }
 
@@ -1047,6 +1229,22 @@ $chatInput.addEventListener('keydown', (e) => {
 // EDIT / DELETE COLLECTION
 // ════════════════════════════════════════════════════════
 
+function renderEditColorPresets() {
+  $editColorPresets.innerHTML = COLOR_PRESETS.map(c => `
+    <div class="color-preset ${c === $editCollectionColorInput.value ? 'selected' : ''}" 
+         style="background: ${c};" 
+         data-color="${c}">
+    </div>
+  `).join('');
+
+  $editColorPresets.querySelectorAll('.color-preset').forEach(el => {
+    el.addEventListener('click', () => {
+      $editCollectionColorInput.value = el.dataset.color;
+      renderEditColorPresets();
+    });
+  });
+}
+
 function openEditModal() {
   const col = state.collections.find(c => c.safe_name === state.activeCollection);
   if (!col) return;
@@ -1054,9 +1252,7 @@ function openEditModal() {
   $editCollectionDescInput.value = col.description || '';
   $editCollectionColorInput.value = col.color || '#6366f1';
   
-  $editColorPresets.innerHTML = COLOR_PRESETS.map(c => 
-    `<div class="color-preset-dot" style="background: ${c};" onclick="document.getElementById('edit-collection-color-input').value = '${c}'"></div>`
-  ).join('');
+  renderEditColorPresets();
 
   $editModal.classList.add('visible');
 }
@@ -1165,6 +1361,7 @@ $fileInput.addEventListener('change', async (e) => {
 });
 
 $collectionColorInput.addEventListener('input', renderColorPresets);
+$editCollectionColorInput.addEventListener('input', renderEditColorPresets);
 
 if ($collectionDescInput) {
   $collectionDescInput.addEventListener('input', () => {
@@ -1200,37 +1397,20 @@ $collectionNameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') createCollection();
 });
 
-if ($collectionOptionsBtn) {
-  $collectionOptionsBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    $collectionOptionsContainer.classList.toggle('open');
-  });
-}
 
-document.addEventListener('click', (e) => {
-  if ($collectionOptionsContainer && !$collectionOptionsContainer.contains(e.target)) {
-    $collectionOptionsContainer.classList.remove('open');
-  }
-});
 
-if ($editCollectionBtn) {
-  $editCollectionBtn.addEventListener('click', () => {
-    $collectionOptionsContainer.classList.remove('open');
-    openEditModal();
-  });
-}
-
-if ($deleteCollectionBtn) {
-  $deleteCollectionBtn.addEventListener('click', () => {
-    $collectionOptionsContainer.classList.remove('open');
-    if (confirm("Are you sure you want to completely delete this collection? This cannot be undone.")) {
+$editModalCancelBtn.addEventListener('click', closeEditModal);
+$editModalSaveBtn.addEventListener('click', saveEditCollection);
+if ($editModalDeleteBtn) {
+  $editModalDeleteBtn.addEventListener('click', () => {
+    const col = state.collections.find(c => c.safe_name === state.activeCollection);
+    const colName = col ? col.name : 'this collection';
+    if (confirm(`Are you sure you want to completely delete the collection "${colName}"? This cannot be undone.`)) {
+      closeEditModal();
       deleteCollection();
     }
   });
 }
-
-$editModalCancelBtn.addEventListener('click', closeEditModal);
-$editModalSaveBtn.addEventListener('click', saveEditCollection);
 $editModal.addEventListener('click', (e) => {
   if (e.target === $editModal) closeEditModal();
 });

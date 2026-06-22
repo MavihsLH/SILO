@@ -27,7 +27,6 @@ This view shows the unified sidebar tab selector where you upload files, configu
 
 <img width="2560" height="1416" alt="image" src="https://github.com/user-attachments/assets/94f40ff3-de34-4067-8db3-b1fce58e38f4" />
 
-
 ### 2. Multi-Chat Session History
 This view highlights the chat tab where you manage persistent chat sessions, toggle web search, and see AI answers complete with cited sources.
 
