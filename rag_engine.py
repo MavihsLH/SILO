@@ -38,7 +38,13 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 
 # --- PATCH FOR LlamaIndex/dirtyjson BUG ---
 # LlamaIndex uses dirtyjson to parse malformed LLM outputs.
@@ -347,8 +353,8 @@ class RAGEngine:
         # ── Stage 1: Loading files ──
         report("loading", 10, f"Loading {len(files)} file(s) from disk...")
         try:
-            from llama_index.readers.file import PyMuPDFReader
-            extractor = {".pdf": PyMuPDFReader()}
+            from pdf_parser import LayoutAwarePDFReader
+            extractor = {".pdf": LayoutAwarePDFReader()}
             reader = SimpleDirectoryReader(input_dir=str(collection_dir), file_extractor=extractor)
             documents = reader.load_data()
         except Exception as e:
@@ -377,6 +383,8 @@ class RAGEngine:
             aclient=self.qdrant_client,
             collection_name=safe_name,
             enable_hybrid=True,
+            fastembed_sparse_model="Qdrant/bm25",
+            batch_size=16,
         )
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -437,24 +445,47 @@ class RAGEngine:
             report("storing", 90, f"Writing {len(nodes)} enriched chunks to vector database...")
             VectorStoreIndex(nodes=nodes, storage_context=storage_context)
         else:
-            # ── Stage 3: Embedding + Storing (fast mode, combined) ──
-            report("embedding", 50, f"Embedding and indexing {len(documents)} document(s)...")
-            # Fast indexing has no nested async LLM calls, so it can run safely in a thread
-            await asyncio.to_thread(
-                VectorStoreIndex.from_documents,
-                documents,
-                storage_context=storage_context,
-                show_progress=True,
-            )
+            import gc
+            from llama_index.core.node_parser import SentenceSplitter
+            # ── Stage 3: Chunking ──
+            report("chunking", 15, f"Splitting {len(documents)} document pages into passages...")
+            splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
+            nodes = splitter.get_nodes_from_documents(documents)
+            # Propagate table/statement unit headers (e.g., "(In millions)") into split chunks
+            # so bottom table rows never lose their scale or statement context.
+            for node in nodes:
+                header = (node.metadata or {}).get("page_header")
+                if header and header[:40].lower() not in node.text[:250].lower():
+                    node.text = f"[Context Header: {header}]\n{node.text}"
+            total_nodes = len(nodes)
+            report("chunking", 25, f"Split into {total_nodes} passages. Preparing embeddings...")
 
-        report("ready", 100, f"Successfully indexed {len(documents)} document(s)!")
+            # ── Stage 4: Embedding + Storing in bounded batches ──
+            batch_step = 24
+
+            def _insert_all_nodes():
+                index = None
+                for i in range(0, total_nodes, batch_step):
+                    chunk = nodes[i : i + batch_step]
+                    end_idx = min(i + len(chunk), total_nodes)
+                    pct = 25 + int((end_idx / total_nodes) * 70)
+                    report("embedding", pct, f"Embedding passages {end_idx} of {total_nodes} ({pct}%)...")
+                    if index is None:
+                        index = VectorStoreIndex(nodes=chunk, storage_context=storage_context, show_progress=False)
+                    else:
+                        index.insert_nodes(chunk)
+                    gc.collect()
+
+            await asyncio.to_thread(_insert_all_nodes)
+
+        report("ready", 100, f"Successfully indexed {len(documents)} document(s) ({total_nodes} passages)!")
         return len(documents)
 
     # ────────────────────────────────────────────────────────
     # Query / Chat
     # ────────────────────────────────────────────────────────
 
-    async def aquery(self, safe_name: str, question: str, top_k: int = 3, online_mode: bool = False) -> dict:
+    async def aquery(self, safe_name: str, question: str, top_k: int = 4, online_mode: bool = False) -> dict:
         """
         Query a collection's knowledge base.
         
@@ -484,7 +515,12 @@ class RAGEngine:
             if safe_name not in qdrant_collections:
                 return []
 
-            vector_store = QdrantVectorStore(aclient=self.qdrant_client, collection_name=safe_name, enable_hybrid=True)
+            vector_store = QdrantVectorStore(
+                aclient=self.qdrant_client,
+                collection_name=safe_name,
+                enable_hybrid=True,
+                fastembed_sparse_model="Qdrant/bm25",
+            )
             index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
             
             # Retrieve more candidate chunks and use hybrid search
@@ -513,20 +549,23 @@ class RAGEngine:
                 })
                 context_texts.append(node.text)
 
-            # Build the prompt
+            # Build the prompt (strict grounding + table-alignment & unit-preservation rules)
             if context_texts:
                 context_block = "\n\n---\n\n".join(context_texts)
                 prompt = (
-                    f"You are an intelligent assistant. Use the following context from the user's knowledge base to answer their question. "
-                    f"If the context is not relevant to the question, you may ignore it and answer based on your own knowledge. "
-                    f"Always be helpful and concise.\n\n"
+                    f"You are a precise, strictly grounded document analyst. Answer the user's question using ONLY the provided Context.\n"
+                    f"Rules:\n"
+                    f"1. Never invent, guess, or pull facts/numbers from outside memory. If the Context does not contain the specific entity, time period, or metric requested (or if the question has a false premise), explicitly state that the provided documents do not contain that information.\n"
+                    f"2. Always preserve exact units and scale (e.g., 'in millions', 'in billions', '%') shown in table headers or context headers.\n"
+                    f"3. When reading pipe-delimited ('|') tables, carefully match each number to its exact row label and column header before reporting it.\n"
+                    f"4. Be concise, accurate, and direct.\n\n"
                     f"## Context:\n{context_block}\n\n"
                     f"## Question:\n{question}"
                 )
             else:
                 prompt = (
-                    f"You are an intelligent assistant. The user's knowledge base returned no results for this query. "
-                    f"Answer based on your own knowledge. Always be helpful and concise.\n\n"
+                    f"You are a precise document analyst. The local knowledge base returned no relevant passages for this query.\n"
+                    f"Explicitly state that the uploaded documents do not contain information to answer this question. Do not guess or fabricate facts.\n\n"
                     f"## Question:\n{question}"
                 )
 
@@ -577,7 +616,7 @@ class RAGEngine:
             logger.error(f"LangGraph execution error: {e}")
             raise e
 
-    async def astream_query(self, safe_name: str, question: str, top_k: int = 3, online_mode: bool = False):
+    async def astream_query(self, safe_name: str, question: str, top_k: int = 4, online_mode: bool = False):
         """
         Query a collection's knowledge base and stream tokens/sources.
         Yields dictionaries.
@@ -595,7 +634,12 @@ class RAGEngine:
             if safe_name not in qdrant_collections:
                 return []
 
-            vector_store = QdrantVectorStore(aclient=self.qdrant_client, collection_name=safe_name, enable_hybrid=True)
+            vector_store = QdrantVectorStore(
+                aclient=self.qdrant_client,
+                collection_name=safe_name,
+                enable_hybrid=True,
+                fastembed_sparse_model="Qdrant/bm25",
+            )
             index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
             
             # Retrieve more candidate chunks and use hybrid search
@@ -624,20 +668,23 @@ class RAGEngine:
             # Yield sources first
             yield {"type": "sources", "sources": sources}
 
-            # Build the prompt
+            # Build the prompt (strict grounding + table-alignment & unit-preservation rules)
             if context_texts:
                 context_block = "\n\n---\n\n".join(context_texts)
                 prompt = (
-                    f"You are an intelligent assistant. Use the following context from the user's knowledge base to answer their question. "
-                    f"If the context is not relevant to the question, you may ignore it and answer based on your own knowledge. "
-                    f"Always be helpful and concise.\n\n"
+                    f"You are a precise, strictly grounded document analyst. Answer the user's question using ONLY the provided Context.\n"
+                    f"Rules:\n"
+                    f"1. Never invent, guess, or pull facts/numbers from outside memory. If the Context does not contain the specific entity, time period, or metric requested (or if the question has a false premise), explicitly state that the provided documents do not contain that information.\n"
+                    f"2. Always preserve exact units and scale (e.g., 'in millions', 'in billions', '%') shown in table headers or context headers.\n"
+                    f"3. When reading pipe-delimited ('|') tables, carefully match each number to its exact row label and column header before reporting it.\n"
+                    f"4. Be concise, accurate, and direct.\n\n"
                     f"## Context:\n{context_block}\n\n"
                     f"## Question:\n{question}"
                 )
             else:
                 prompt = (
-                    f"You are an intelligent assistant. The user's knowledge base returned no results for this query. "
-                    f"Answer based on your own knowledge. Always be helpful and concise.\n\n"
+                    f"You are a precise document analyst. The local knowledge base returned no relevant passages for this query.\n"
+                    f"Explicitly state that the uploaded documents do not contain information to answer this question. Do not guess or fabricate facts.\n\n"
                     f"## Question:\n{question}"
                 )
 

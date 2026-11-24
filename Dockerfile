@@ -1,3 +1,12 @@
+# Stage 1: Build Vite + React 19 Frontend
+FROM node:22-slim AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: FastAPI + LangGraph Runtime
 FROM python:3.10-slim
 
 # Set environment variables
@@ -20,6 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
+
+# Copy compiled frontend production bundle from Stage 1
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 # Expose port
 EXPOSE 8000

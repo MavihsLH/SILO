@@ -1,0 +1,22 @@
+{
+  "timestamp": "2026-11-23T23:14:28.180441",
+  "chat_model": "llama3.1:8b",
+  "embed_model": "BAAI/bge-small-en-v1.5",
+  "sparse_model": "Qdrant/bm25",
+  "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  "top_k": 4,
+  "strict_mode": true,
+  "dataset_size": 50,
+  "engine_init_sec": 13.79,
+  "system_ram": {
+    "total_gb": 15.31,
+    "available_gb": 0.45,
+    "percent_used": 97
+  },
+  "process_ram_final": {
+    "current_rss_mb": 940.6,
+    "peak_rss_mb": 1059.1
+  },
+  "platform": "Windows-10-10.0.26300-SP0",
+  "processor": "AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD"
+}

@@ -4,7 +4,13 @@ import json
 import logging
 import asyncio
 from typing import List, Dict, Any, TypedDict, Optional
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from llama_index.core import VectorStoreIndex
@@ -63,12 +69,15 @@ def _ddg_search_sync(query: str) -> List[Dict[str, Any]]:
 # Node Functions
 # ============================================================
 
+MIN_RERANK_SCORE = 0.05
+
+
 async def retrieve_node(state: GraphState, config: RunnableConfig) -> Dict[str, Any]:
     """Retrieve documents from the local Qdrant collection."""
     logger.info("--- LANGGRAPH: RETRIEVE ---")
     engine = config["configurable"]["engine"]
     safe_name = config["configurable"]["safe_name"]
-    top_k = config["configurable"].get("top_k", 3)
+    top_k = config["configurable"].get("top_k", 4)
     question = state["question"]
     
     on_token = config["configurable"].get("on_token", None)
@@ -87,7 +96,12 @@ async def retrieve_node(state: GraphState, config: RunnableConfig) -> Dict[str, 
         return {"documents": []}
 
     try:
-        vector_store = QdrantVectorStore(aclient=engine.qdrant_client, collection_name=safe_name, enable_hybrid=True)
+        vector_store = QdrantVectorStore(
+            aclient=engine.qdrant_client,
+            collection_name=safe_name,
+            enable_hybrid=True,
+            fastembed_sparse_model="Qdrant/bm25",
+        )
         index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
         
         # Pull candidate chunks
@@ -98,16 +112,22 @@ async def retrieve_node(state: GraphState, config: RunnableConfig) -> Dict[str, 
         engine.reranker.top_n = top_k
         nodes = engine.reranker.postprocess_nodes(nodes, query_str=question)
         
+        # Drop clearly irrelevant chunks below calibrated cross-encoder score floor
+        # so out-of-corpus queries route cleanly to web fallback without noisy LLM grading.
         documents = []
         for node in nodes:
+            score = float(node.score) if node.score is not None else 0.0
+            if score < MIN_RERANK_SCORE:
+                logger.info(f"Filtered low-relevance chunk (rerank score={score:.4f} < {MIN_RERANK_SCORE})")
+                continue
             documents.append({
                 "text": node.text,
-                "score": node.score,
+                "score": score,
                 "metadata": node.metadata,
                 "type": "local"
             })
             
-        logger.info(f"Retrieved {len(documents)} document nodes.")
+        logger.info(f"Retrieved {len(documents)} document nodes above score floor.")
         return {"documents": documents}
     except Exception as e:
         logger.error(f"Retrieval node error: {e}")
@@ -115,7 +135,7 @@ async def retrieve_node(state: GraphState, config: RunnableConfig) -> Dict[str, 
 
 
 async def grade_documents_node(state: GraphState, config: RunnableConfig) -> Dict[str, Any]:
-    """Grade the relevance of retrieved documents in a batch to save LLM roundtrips."""
+    """Grade whether retrieved documents contain sufficient evidence to answer the exact question (CRAG)."""
     logger.info("--- LANGGRAPH: GRADE DOCUMENTS ---")
     engine = config["configurable"]["engine"]
     question = state["question"]
@@ -126,24 +146,29 @@ async def grade_documents_node(state: GraphState, config: RunnableConfig) -> Dic
         await on_token({"type": "status", "status": "Grading relevance of documents..."})
     
     if not documents:
-        logger.info("No documents retrieved. Triggering web search fallback.")
+        logger.info("No documents above score floor. Triggering web search fallback.")
         return {"web_search": True, "documents": []}
         
-    # Format all documents with indices for batch grading
+    # Format all documents with indices for batch sufficiency grading
     docs_formatted = ""
     for idx, doc in enumerate(documents):
         docs_formatted += f"Document [{idx}]:\n{doc['text']}\n\n"
         
     prompt = (
-        f"You are a relevance grader. Grade the relevance of the following retrieved documents to the user's question.\n"
+        f"You are a strict evidence-sufficiency grader for a Retrieval-Augmented Generation system.\n"
+        f"Determine which retrieved documents contain ACTUAL factual evidence (specific figures, definitions, tables, or statements) "
+        f"that can directly answer the user's EXACT question.\n\n"
+        f"Strict rejection rules:\n"
+        f"- Topical similarity or shared keywords alone is NOT sufficient.\n"
+        f"- Check the exact ENTITY (a document about Company A or Model X does NOT answer a question about Company B or Model Y).\n"
+        f"- Check the exact TIME PERIOD or RELEASE DATE (a historical filing/paper does NOT answer future years, live/today real-time data, or newer products/models released after the document date).\n"
+        f"- Check the exact METRIC or TASK (a document evaluating Task A does NOT answer metrics for an unrelated Task B).\n"
+        f"- If a document does NOT contain direct evidence to answer the exact question, exclude its index.\n\n"
         f"User Question: {question}\n\n"
         f"Documents:\n{docs_formatted}"
-        f"For each document, determine if it contains information relevant to answer the user's question.\n"
-        f"Output your evaluation as a JSON list of indices of the relevant documents. For example, if Document 0 and Document 2 are relevant, output:\n"
-        f"[0, 2]\n"
-        f"If none of the documents are relevant, output:\n"
-        f"[]\n\n"
-        f"Output ONLY the raw JSON list of indices, with no explanation, no preamble, and no extra text."
+        f"Output ONLY a raw JSON list of indices of the strictly sufficient documents (e.g., [0, 2]), "
+        f"or [] if NONE of the documents can answer the exact question.\n"
+        f"No explanation, no preamble, and no extra text."
     )
     
     try:
@@ -248,25 +273,29 @@ async def generate_node(state: GraphState, config: RunnableConfig) -> Dict[str, 
                 "type": doc.get("type", "local")
             })
             
-    # Construct synthesis prompt
+    # Construct strictly grounded synthesis prompt
     if documents:
         context_block = "\n\n---\n\n".join([doc["text"] for doc in documents])
         prompt = (
-            f"You are an intelligent assistant. Use the following context to answer the user's question.\n"
-            f"If the context is not relevant to the question, you may ignore it and answer based on your own knowledge.\n"
-            f"Always be helpful and concise.\n\n"
+            f"You are a precise, strictly grounded document analyst. Answer the user's question using ONLY the provided Context.\n"
+            f"Rules:\n"
+            f"1. Never invent, guess, or pull facts/numbers from outside memory. If the Context does not contain the specific entity, time period, or metric requested (or if the question contains a false premise about a document), explicitly state that the provided sources do not contain that information.\n"
+            f"2. Always preserve exact units and scale (e.g., 'in millions', 'in billions', '%') shown in table headers or context headers.\n"
+            f"3. When reading pipe-delimited ('|') tables, carefully match each number to its exact row label and column header before reporting it.\n"
+            f"4. Be concise, accurate, and direct.\n\n"
             f"## Context:\n{context_block}\n\n"
             f"## Question:\n{question}"
         )
     else:
         prompt = (
-            f"You are an intelligent assistant. Answer based on your own knowledge. Always be helpful and concise.\n\n"
+            f"You are a precise document analyst. Neither the local documents nor fallback search returned relevant evidence for this query.\n"
+            f"Explicitly state that the provided documents do not contain information to answer this question. Do not guess or fabricate facts.\n\n"
             f"## Question:\n{question}"
         )
         
     strict_mode = state.get("strict_mode", False)
     retry_count = state.get("retry_count", 0)
-    should_stream_now = not strict_mode or retry_count >= 2
+    should_stream_now = not strict_mode or retry_count >= 1
     
     generation = ""
     try:
@@ -324,11 +353,14 @@ async def grade_generation_node(state: GraphState, config: RunnableConfig) -> Di
     context_block = "\n\n---\n\n".join([doc["text"] for doc in documents])
     
     prompt = (
-        f"You are a factuality grader. Assess whether the assistant's answer is grounded in and fully supported by the retrieved documents.\n"
-        f"Do not allow any facts or assumptions that cannot be verified directly from the documents.\n\n"
+        f"You are a factuality grader. Assess whether the assistant's answer is grounded and faithful to the retrieved documents.\n"
+        f"Rules:\n"
+        f"- Output 'yes' if all facts and numbers in the answer are supported by the retrieved documents.\n"
+        f"- ALSO output 'yes' if the assistant honestly states that the retrieved documents do not contain the requested information (or corrects a false premise) without inventing unverified facts.\n"
+        f"- Output 'no' ONLY if the assistant fabricated facts, invented wrong numbers, or made claims not supported by the documents.\n\n"
         f"## Retrieved Documents:\n{context_block}\n\n"
         f"## Assistant's Answer:\n{generation}\n\n"
-        f"Is the assistant's answer fully supported by the retrieved documents? (yes or no)\n"
+        f"Is the assistant's answer faithful (grounded or an honest refusal without fabrication)?\n"
         f"Output ONLY 'yes' or 'no' with no other words."
     )
     
@@ -341,7 +373,7 @@ async def grade_generation_node(state: GraphState, config: RunnableConfig) -> Di
         retry_count = state.get("retry_count", 0)
         
         # If validated grounded or hit max retries, stream to user now
-        if is_grounded or retry_count >= 2:
+        if is_grounded or retry_count >= 1:
             if on_token:
                 await on_token({"type": "clear"})
                 await on_token({"type": "sources", "sources": state["sources"]})
@@ -412,7 +444,7 @@ def decide_web_search(state: GraphState) -> str:
 
 def decide_retry(state: GraphState) -> str:
     """Decide whether to rewrite query and retry retrieval or exit."""
-    if not state.get("is_grounded", True) and state["retry_count"] < 2:
+    if not state.get("is_grounded", True) and state["retry_count"] < 1:
         return "rewrite_query"
     else:
         return END

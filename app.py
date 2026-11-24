@@ -7,8 +7,10 @@ collections management, file upload, and chat.
 """
 
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# Default to online on first run so models can be downloaded, or configure via HF_OFFLINE env var
+if os.environ.get("HF_OFFLINE", "0") == "1":
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -102,6 +104,41 @@ def update_settings(req: SettingsRequest):
         strict_mode=req.strict_mode
     )
 
+@app.get("/api/system/ram")
+def get_system_ram():
+    """Retrieve system physical RAM usage and low-memory warning flag."""
+    try:
+        import platform
+        if platform.system() == "Windows":
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ('dwLength', ctypes.c_ulong),
+                    ('dwMemoryLoad', ctypes.c_ulong),
+                    ('ullTotalPhys', ctypes.c_ulonglong),
+                    ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong),
+                    ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong),
+                    ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                total_gb = round(stat.ullTotalPhys / (1024**3), 2)
+                avail_gb = round(stat.ullAvailPhys / (1024**3), 2)
+                used_pct = int(stat.dwMemoryLoad)
+                return {
+                    "total_gb": total_gb,
+                    "available_gb": avail_gb,
+                    "percent_used": used_pct,
+                    "is_warning": avail_gb < 2.5 or used_pct >= 82,
+                }
+    except Exception:
+        pass
+    return {"total_gb": 16.0, "available_gb": 8.0, "percent_used": 50, "is_warning": False}
+
 # ============================================================
 # API Routes — Collections
 # ============================================================
@@ -119,7 +156,7 @@ async def list_collections():
 async def create_collection(req: CreateCollectionRequest):
     """Create a new collection."""
     try:
-        meta = await engine.create_collection(
+        meta = engine.create_collection(
             name=req.name,
             description=req.description,
             color=req.color,
@@ -181,7 +218,7 @@ async def delete_collection(safe_name: str):
 async def upload_file(safe_name: str, file: UploadFile = File(...)):
     """Upload a file to a collection."""
     # Validate collection exists
-    if engine.get_collection(safe_name) is None:
+    if await engine.get_collection(safe_name) is None:
         raise HTTPException(status_code=404, detail="Collection not found")
 
     # Validate file type
@@ -409,15 +446,30 @@ async def send_chat_message(chat_id: str, req: SendMessageRequest, stream: bool 
 
 
 # ============================================================
-# Serve Frontend (static files)
+# Serve Frontend (Vite + React 19 Production Bundle & Static Assets)
 # ============================================================
 
-# Mount static files directory
-static_dir = os.path.join(os.path.dirname(__file__), "static")
+base_dir = os.path.dirname(__file__)
+static_dir = os.path.join(base_dir, "static")
+frontend_dist_dir = os.path.join(base_dir, "frontend", "dist")
+frontend_assets_dir = os.path.join(frontend_dist_dir, "assets")
+frontend_img_dir = os.path.join(frontend_dist_dir, "img")
+
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+if os.path.exists(frontend_assets_dir):
+    app.mount("/assets", StaticFiles(directory=frontend_assets_dir), name="assets")
+
+if os.path.exists(frontend_img_dir):
+    app.mount("/img", StaticFiles(directory=frontend_img_dir), name="img")
+elif os.path.exists(os.path.join(static_dir, "img")):
+    app.mount("/img", StaticFiles(directory=os.path.join(static_dir, "img")), name="img")
 
 
 @app.get("/")
 async def root():
+    dist_index = os.path.join(frontend_dist_dir, "index.html")
+    if os.path.exists(dist_index):
+        return FileResponse(dist_index)
     return FileResponse("static/html/index.html")
